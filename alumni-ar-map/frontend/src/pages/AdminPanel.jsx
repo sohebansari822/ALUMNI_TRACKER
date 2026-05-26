@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 
-const API = 'http://192.168.1.6:8000/api/alumni/'
+const API = '/api/alumni/'
 
 export default function AdminPanel() {
   const [alumni, setAlumni] = useState([])

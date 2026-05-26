@@ -6,5 +6,15 @@ export default defineConfig({
   server: {
     allowedHosts: ['pound-shudder-exhale.ngrok-free.dev'],
     host: true,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/media': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      }
+    }
   }
 })
