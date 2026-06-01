@@ -1,5 +1,6 @@
 from django.db import models
 from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
 
 class Alumni(models.Model):
     name        = models.CharField(max_length=100)
@@ -12,15 +13,15 @@ class Alumni(models.Model):
     longitude   = models.FloatField(blank=True, null=True)
 
     def save(self, *args, **kwargs):
-        # Auto geocode on save
-        if self.city and self.country:
+        if self.city and self.country and (not self.latitude or not self.longitude):
             try:
-                geolocator = Nominatim(user_agent="alumni-ar-map")
-                location = geolocator.geocode(f"{self.city}, {self.country}")
+                geolocator = Nominatim(user_agent="alumni-ar-map", timeout=10)
+                geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+                location = geocode(f"{self.city}, {self.country}")
                 if location:
                     self.latitude = location.latitude
                     self.longitude = location.longitude
-            except:
+            except Exception:
                 pass
         super().save(*args, **kwargs)
 

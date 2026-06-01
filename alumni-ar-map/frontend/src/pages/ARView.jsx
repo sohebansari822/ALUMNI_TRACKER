@@ -1,25 +1,40 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import axios from 'axios'
 
 const API = '/api/alumni/'
 
+const LAT_MAX = 83.6
 function latLngToPercent(lat, lng) {
-  const x = 0.2750 * lng + 39.5
-  const latRad = lat * Math.PI / 180
-  const merc = Math.log(Math.tan(Math.PI / 4 + latRad / 2))
-  const y = -35.336 * merc + 60.5
-  // Clamp to map bounds — no dot goes outside
+  const x = (lng + 180) / 360 * 100
+  const y = (LAT_MAX - lat) / (LAT_MAX * 2) * 100
   return {
     x: Math.max(2, Math.min(98, x)),
     y: Math.max(2, Math.min(98, y))
   }
 }
 
+// One pin per unique city+country
+function computeGroups(alumni) {
+  const map = {}
+  alumni.forEach(a => {
+    if (!a.latitude || !a.longitude) return
+    const key = `${a.city.trim().toLowerCase()}|${a.country.trim().toLowerCase()}`
+    if (!map[key]) {
+      const { x, y } = latLngToPercent(a.latitude, a.longitude)
+      map[key] = { x, y, members: [] }
+    }
+    map[key].members.push(a)
+  })
+  return Object.values(map)
+}
+
 export default function ARView() {
-  const [alumni, setAlumni] = useState([])
-  const [selected, setSelected] = useState(null)
-  const [arReady, setArReady] = useState(false)
+  const [alumni, setAlumni]         = useState([])
+  const [selected, setSelected]     = useState(null)
+  const [arReady, setArReady]       = useState(false)
   const [mapVisible, setMapVisible] = useState(false)
+  const [pinPositions, setPinPositions] = useState([])
+  const animRef = useRef(null)
 
   useEffect(() => {
     axios.get(API).then(res => setAlumni(res.data))
@@ -46,106 +61,204 @@ export default function ARView() {
     const scene = document.createElement('a-scene')
     scene.id = 'ar-scene'
     scene.setAttribute('mindar-image',
-      'imageTargetSrc: /targets.mind; autoStart: true; uiLoading: yes; uiScanning: yes;')
+      'imageTargetSrc: /targets.mind; autoStart: true; uiLoading: yes; uiScanning: yes; filterMinCF: 0.001; filterBeta: 0.001; warmupTolerance: 5; missTolerance: 10;')
     scene.setAttribute('vr-mode-ui', 'enabled: false')
     scene.setAttribute('device-orientation-permission-ui', 'enabled: false')
     scene.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;'
 
     scene.addEventListener('targetFound', () => setMapVisible(true))
-    scene.addEventListener('targetLost', () => setMapVisible(false))
+    scene.addEventListener('targetLost',  () => { setMapVisible(false); setPinPositions([]) })
 
     const camera = document.createElement('a-camera')
     camera.setAttribute('position', '0 0 0')
     camera.setAttribute('look-controls', 'enabled: false')
-    const cursor = document.createElement('a-entity')
-    cursor.setAttribute('cursor', 'rayOrigin: mouse')
-    cursor.setAttribute('raycaster', 'objects: .clickable')
-    camera.appendChild(cursor)
     scene.appendChild(camera)
 
     const target = document.createElement('a-entity')
     target.setAttribute('mindar-image-target', 'targetIndex: 0')
 
-    // Group nearby alumni
-    const groups = []
-    alumni.forEach(a => {
-      if (!a.latitude || !a.longitude) return
-      const { x, y } = latLngToPercent(a.latitude, a.longitude)
-      const existing = groups.find(g =>
-        Math.abs(g.x - x) < 3 && Math.abs(g.y - y) < 3
-      )
-      if (existing) existing.members.push(a)
-      else groups.push({ x, y, members: [a] })
-    })
+    const groups = computeGroups(alumni)
 
-    groups.forEach((group) => {
-      const ax = (group.x / 100) * 2 - 1
-      const ay = 0.5 - (group.y / 100) * 1
+    groups.forEach(group => {
+      const ax = (group.x / 100) - 0.5
+      const ay = 0.25 - (group.y / 100) * 0.5
       const count = group.members.length
+      const color = '#60a5fa'
 
-      // --- PARACHUTE / PIN STYLE ---
-      // Thin vertical line (stem)
-      const stem = document.createElement('a-cylinder')
-      stem.setAttribute('position', `${ax} ${ay + 0.018} 0.01`)
-      stem.setAttribute('radius', '0.002')
-      stem.setAttribute('height', '0.036')
-      stem.setAttribute('color', '#ffffff')
-      stem.setAttribute('opacity', '0.9')
+      // 3 smooth wave rings — a-ring has no center polygon so no spin artifact
+      for (let w = 0; w < 3; w++) {
+        const wave = document.createElement('a-ring')
+        wave.setAttribute('position', `${ax} ${ay} -0.001`)
+        wave.setAttribute('radius-inner', '0.006')
+        wave.setAttribute('radius-outer', '0.008')
+        wave.setAttribute('segments-theta', '64')
+        wave.setAttribute('color', color)
+        wave.setAttribute('material', 'transparent: true; opacity: 0')
+        wave.setAttribute('animation__s',
+          `property: scale; from: 1 1 1; to: 6 6 1; dur: 2200; loop: true; delay: ${w * 730}; easing: linear`)
+        wave.setAttribute('animation__o',
+          `property: material.opacity; from: 0.5; to: 0; dur: 2200; loop: true; delay: ${w * 730}; easing: linear`)
+        target.appendChild(wave)
+      }
 
-      // Circle head (thin outline style)
-      const head = document.createElement('a-ring')
-      head.setAttribute('position', `${ax} ${ay + 0.038} 0.011`)
-      head.setAttribute('radius-inner', '0.010')
-      head.setAttribute('radius-outer', '0.014')
-      head.setAttribute('color', count > 1 ? '#f59e0b' : '#60a5fa')
-      head.setAttribute('opacity', '1')
-
-      // Filled center dot
+      // Fixed solid center circle
       const center = document.createElement('a-circle')
-      center.setAttribute('position', `${ax} ${ay + 0.038} 0.012`)
+      center.setAttribute('position', `${ax} ${ay} 0`)
       center.setAttribute('radius', '0.007')
-      center.setAttribute('color', count > 1 ? '#f59e0b' : '#60a5fa')
-      center.setAttribute('opacity', '0.6')
+      center.setAttribute('color', color)
+      center.setAttribute('material', 'transparent: false; opacity: 1')
 
-      // Count badge
+      // White dot in the middle
+      const innerDot = document.createElement('a-circle')
+      innerDot.setAttribute('position', `${ax} ${ay} 0.001`)
+      innerDot.setAttribute('radius', '0.003')
+      innerDot.setAttribute('color', '#ffffff')
+      innerDot.setAttribute('material', 'transparent: false; opacity: 1')
+
+      // Count badge for grouped pins
       if (count > 1) {
         const badge = document.createElement('a-text')
-        badge.setAttribute('value', `${count}`)
-        badge.setAttribute('position', `${ax} ${ay + 0.038} 0.015`)
+        badge.setAttribute('value', String(count))
+        badge.setAttribute('position', `${ax} ${ay} 0.002`)
         badge.setAttribute('align', 'center')
-        badge.setAttribute('color', 'white')
-        badge.setAttribute('width', '0.08')
+        badge.setAttribute('color', '#ffffff')
+        badge.setAttribute('width', '0.035')
         target.appendChild(badge)
       }
 
-      // Invisible click area
-      const plane = document.createElement('a-plane')
-      plane.setAttribute('position', `${ax} ${ay + 0.025} 0.02`)
-      plane.setAttribute('width', '0.06')
-      plane.setAttribute('height', '0.08')
-      plane.setAttribute('opacity', '0.01')
-      plane.setAttribute('class', 'clickable')
-      plane.addEventListener('click', () => {
-        setSelected(prev =>
-          prev && prev[0]?.id === group.members[0]?.id ? null : group.members
-        )
-      })
-
-      target.appendChild(stem)
-      target.appendChild(head)
       target.appendChild(center)
-      target.appendChild(plane)
+      target.appendChild(innerDot)
     })
 
     scene.appendChild(target)
     document.body.appendChild(scene)
 
+    // Project each pin's 3D AR position → 2D screen coords every frame.
+    // Invisible HTML buttons sit at those coords for reliable mobile touch.
+    scene.addEventListener('loaded', () => {
+      const tick = () => {
+        const threeCamera = scene.camera
+        const targetEl = document.querySelector('[mindar-image-target]')
+        if (threeCamera && targetEl && window.THREE) {
+          const obj = targetEl.object3D
+          const updated = groups.map(group => {
+            const ax = (group.x / 100) - 0.5
+            const ay = 0.25 - (group.y / 100) * 0.5
+            const vec = new window.THREE.Vector3(ax, ay, 0)
+            obj.localToWorld(vec)
+            vec.project(threeCamera)
+            return {
+              screenX: (vec.x + 1) / 2 * window.innerWidth,
+              screenY: -(vec.y - 1) / 2 * window.innerHeight,
+              members: group.members,
+              inView: vec.z < 1,
+            }
+          })
+          setPinPositions(updated)
+        }
+        animRef.current = requestAnimationFrame(tick)
+      }
+      tick()
+    })
+
     return () => {
+      cancelAnimationFrame(animRef.current)
       const s = document.getElementById('ar-scene')
       if (s) s.remove()
+      setPinPositions([])
     }
   }, [arReady, alumni])
 
+  // ── PROFILE VIEW — full screen, hides AR completely ───────────────────────
+  if (selected) {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, zIndex: 200,
+        background: '#080f1e', overflowY: 'auto',
+        display: 'flex', flexDirection: 'column',
+      }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          padding: '16px 20px',
+          background: 'rgba(15,23,42,0.98)',
+          borderBottom: '1px solid rgba(59,130,246,0.2)',
+          position: 'sticky', top: 0, zIndex: 10,
+        }}>
+          <button
+            onPointerDown={() => setSelected(null)}
+            style={{
+              background: 'rgba(59,130,246,0.15)',
+              border: '1px solid rgba(59,130,246,0.4)',
+              color: '#60a5fa', borderRadius: 10,
+              padding: '8px 16px', fontSize: 14,
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+            }}
+          >
+            ← Back to Map
+          </button>
+          <span style={{ color: '#94a3b8', fontSize: 13 }}>
+            {selected.length > 1
+              ? `${selected.length} alumni · ${selected[0].city}, ${selected[0].country}`
+              : `${selected[0].city}, ${selected[0].country}`}
+          </span>
+        </div>
+
+        <div style={{ padding: '20px 20px 48px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {selected.map(a => (
+            <div key={a.id} style={{
+              background: 'rgba(15,23,42,1)',
+              border: '1px solid rgba(59,130,246,0.25)',
+              borderRadius: 20, padding: 20,
+              boxShadow: '0 4px 30px rgba(0,0,0,0.5)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+                <div style={{
+                  width: 64, height: 64, borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 26, fontWeight: 'bold', flexShrink: 0,
+                  overflow: 'hidden', color: 'white',
+                  boxShadow: '0 0 0 3px rgba(59,130,246,0.35)',
+                }}>
+                  {a.photo
+                    ? <img src={a.photo} alt={a.name}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    : a.name.charAt(0).toUpperCase()}
+                </div>
+                <div>
+                  <div style={{ color: 'white', fontSize: 20, fontWeight: 'bold', lineHeight: 1.2 }}>{a.name}</div>
+                  <div style={{ color: '#94a3b8', fontSize: 13, marginTop: 3 }}>Class of {a.batch_year}</div>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {[
+                  { icon: '🏢', label: 'Company',  value: a.company },
+                  { icon: '📍', label: 'Location', value: `${a.city}, ${a.country}` },
+                  { icon: '🎓', label: 'Batch',    value: a.batch_year },
+                ].map(item => (
+                  <div key={item.label} style={{
+                    background: 'rgba(255,255,255,0.04)',
+                    border: '1px solid rgba(255,255,255,0.07)',
+                    borderRadius: 12, padding: '12px 16px',
+                    display: 'flex', alignItems: 'center', gap: 12,
+                  }}>
+                    <span style={{ fontSize: 18 }}>{item.icon}</span>
+                    <div>
+                      <div style={{ fontSize: 10, color: '#475569', marginBottom: 2 }}>{item.label}</div>
+                      <div style={{ color: 'white', fontSize: 14, fontWeight: 600 }}>{item.value}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  // ── AR MAP VIEW ────────────────────────────────────────────────────────────
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 1, pointerEvents: 'none' }}>
 
@@ -153,7 +266,7 @@ export default function ARView() {
         <div style={{
           position: 'fixed', inset: 0, background: '#0a0a0a',
           display: 'flex', flexDirection: 'column',
-          justifyContent: 'center', alignItems: 'center', zIndex: 999
+          justifyContent: 'center', alignItems: 'center', zIndex: 999,
         }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>🎓</div>
           <div style={{ color: 'white', fontSize: 18, fontWeight: 'bold' }}>Loading AR...</div>
@@ -165,8 +278,7 @@ export default function ARView() {
           position: 'fixed', bottom: 100, left: '50%',
           transform: 'translateX(-50%)',
           background: 'rgba(0,0,0,0.75)', color: 'white',
-          padding: '10px 20px', borderRadius: 20, fontSize: 13,
-          pointerEvents: 'none', zIndex: 10
+          padding: '10px 20px', borderRadius: 20, fontSize: 13, zIndex: 10,
         }}>
           📷 Point camera at the world map
         </div>
@@ -177,64 +289,38 @@ export default function ARView() {
         padding: '12px 16px', pointerEvents: 'auto',
         background: 'linear-gradient(to bottom, rgba(0,0,0,0.75), transparent)',
         display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        zIndex: 10
+        zIndex: 10,
       }}>
         <span style={{ color: 'white', fontWeight: 'bold', fontSize: 15 }}>🎓 Alumni AR Map</span>
         <span style={{
           background: mapVisible ? '#22c55e' : '#3b82f6',
           color: 'white', padding: '4px 12px',
-          borderRadius: 20, fontSize: 12, fontWeight: 'bold'
+          borderRadius: 20, fontSize: 12, fontWeight: 'bold',
         }}>
-          {mapVisible ? '✅ Map Detected' : `${alumni.length} Alumni`}
+          {mapVisible ? `✅ ${alumni.length} Alumni` : 'Scanning...'}
         </span>
       </div>
 
-      {selected && (
-        <div style={{
-          position: 'fixed', bottom: 24, left: '50%',
-          transform: 'translateX(-50%)',
-          background: 'rgba(15,23,42,0.97)',
-          border: '1px solid #3b82f6',
-          borderRadius: 16, padding: 20,
-          width: '88%', maxWidth: 360,
-          zIndex: 100, color: 'white',
-          pointerEvents: 'auto',
-          maxHeight: '60vh', overflowY: 'auto',
-          boxShadow: '0 0 30px rgba(59,130,246,0.4)'
-        }}>
-          <button onClick={() => setSelected(null)} style={{
-            position: 'absolute', top: 10, right: 14,
-            background: 'none', border: 'none',
-            color: '#94a3b8', fontSize: 20, cursor: 'pointer'
-          }}>✕</button>
-          <div style={{ fontSize: 11, color: '#60a5fa', marginBottom: 12, letterSpacing: 1 }}>
-            {selected.length > 1 ? `${selected.length} ALUMNI IN THIS AREA` : 'ALUMNI INFO'}
-          </div>
-          {selected.map((a, i) => (
-            <div key={a.id} style={{
-              marginBottom: i < selected.length - 1 ? 16 : 0,
-              paddingBottom: i < selected.length - 1 ? 16 : 0,
-              borderBottom: i < selected.length - 1 ? '1px solid rgba(255,255,255,0.1)' : 'none'
-            }}>
-              <div style={{ fontSize: 17, fontWeight: 'bold', marginBottom: 8 }}>{a.name}</div>
-              {[
-                { label: '🎓 Batch', value: a.batch_year },
-                { label: '🏢 Company', value: a.company },
-                { label: '📍 Location', value: `${a.city}, ${a.country}` },
-              ].map(item => (
-                <div key={item.label} style={{
-                  background: 'rgba(255,255,255,0.05)',
-                  padding: '6px 10px', borderRadius: 8, marginBottom: 4,
-                  display: 'flex', justifyContent: 'space-between'
-                }}>
-                  <span style={{ fontSize: 11, color: '#64748b' }}>{item.label}</span>
-                  <span style={{ fontSize: 12 }}>{item.value}</span>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Invisible HTML buttons projected over each 3D pin */}
+      {pinPositions.map((pin, i) => pin.inView && (
+        <button
+          key={i}
+          onPointerDown={() => setSelected(pin.members)}
+          style={{
+            position: 'fixed',
+            left: pin.screenX - 30,
+            top: pin.screenY - 30,
+            width: 60, height: 60,
+            borderRadius: '50%',
+            background: 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            zIndex: 50,
+            pointerEvents: 'auto',
+            WebkitTapHighlightColor: 'transparent',
+          }}
+        />
+      ))}
     </div>
   )
 }
